@@ -9,6 +9,12 @@ Vector2 :: distinct [2]f32
 FRect :: struct { x, y, w, h: f32 }
 FColor :: distinct [4]f32
 
+MAX_RECTS :: 32
+
+VERTEX_BUFFER_SIZE :: u32(size_of(Vector2) * 4 * MAX_RECTS)
+INDEX_BUFFER_SIZE :: u32(size_of(u16) * 6 * MAX_RECTS)
+COLOR_BUFFER_SIZE :: u32(size_of(FColor) * MAX_RECTS)
+
 rect_colors := [?]FColor{
 	{ 0.8, 0.2, 0.2, 1.0 },
 	{ 0.2, 0.8, 0.2, 1.0 },
@@ -23,6 +29,10 @@ rect_colors := [?]FColor{
 APP_CTX :: struct {
 	window: ^sdl.Window,
 	device: ^sdl.GPUDevice,
+	vertex_buffer: ^sdl.GPUBuffer,
+	index_buffer: ^sdl.GPUBuffer,
+	color_buffer: ^sdl.GPUBuffer,
+	transfer_buffer: ^sdl.GPUTransferBuffer,
 	debug:  bool,
 }
 
@@ -47,10 +57,35 @@ app_init :: proc() -> int {
 		fmt.eprintf("Failed to claim window for GPU device. Error: %s\n", sdl.GetError())
 		return 1
 	}
+
+	app_ctx.vertex_buffer = sdl.CreateGPUBuffer(app_ctx.device, {
+		usage = {.VERTEX},
+		size = VERTEX_BUFFER_SIZE,
+	})
+	app_ctx.index_buffer = sdl.CreateGPUBuffer(app_ctx.device, {
+		usage = {.INDEX},
+		size = INDEX_BUFFER_SIZE,
+	})
+	app_ctx.color_buffer = sdl.CreateGPUBuffer(app_ctx.device, {
+		usage = {.GRAPHICS_STORAGE_READ},
+		size = COLOR_BUFFER_SIZE,
+	})
+
+	app_ctx.transfer_buffer = sdl.CreateGPUTransferBuffer(app_ctx.device, {
+		usage = .UPLOAD,
+		size = VERTEX_BUFFER_SIZE + INDEX_BUFFER_SIZE + COLOR_BUFFER_SIZE,
+	})
+
 	return 0
 }
 
 app_quit :: proc() {
+	sdl.ReleaseGPUTransferBuffer(app_ctx.device, app_ctx.transfer_buffer)
+
+	sdl.ReleaseGPUBuffer(app_ctx.device, app_ctx.vertex_buffer)
+	sdl.ReleaseGPUBuffer(app_ctx.device, app_ctx.index_buffer)
+	sdl.ReleaseGPUBuffer(app_ctx.device, app_ctx.color_buffer)
+
 	sdl.ReleaseWindowFromGPUDevice(app_ctx.device, app_ctx.window)
 	sdl.DestroyWindow(app_ctx.window)
 	sdl.DestroyGPUDevice(app_ctx.device)
@@ -185,33 +220,11 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 
 	viewport := Vector2{f32(vw), f32(vh)}
 
-	vertex_buffer_size := u32(size_of(Vector2) * 4 * len(rects))
-	index_buffer_size  := u32(size_of(u16) * 6 * len(rects))
-	color_buffer_size  := u32(size_of(FColor) * len(rects))
-
-	vertex_buffer := sdl.CreateGPUBuffer(app_ctx.device, {
-		usage = {.VERTEX},
-		size = vertex_buffer_size,
-	})
-	index_buffer := sdl.CreateGPUBuffer(app_ctx.device, {
-		usage = {.INDEX},
-		size = index_buffer_size,
-	})
-	color_buffer := sdl.CreateGPUBuffer(app_ctx.device, {
-		usage = {.GRAPHICS_STORAGE_READ},
-		size = color_buffer_size,
-	})
-
-	transfer_buffer := sdl.CreateGPUTransferBuffer(app_ctx.device, {
-		usage = .UPLOAD,
-		size = vertex_buffer_size + index_buffer_size + color_buffer_size,
-	})
-
-	transfer_ptr := sdl.MapGPUTransferBuffer(app_ctx.device, transfer_buffer, false)
+	transfer_ptr := sdl.MapGPUTransferBuffer(app_ctx.device, app_ctx.transfer_buffer, true)
 
 	vertex_data := cast([^]Vector2)transfer_ptr
-	index_data  := cast([^]u16)rawptr(uintptr(transfer_ptr) + uintptr(vertex_buffer_size))
-	color_data  := cast([^]FColor)rawptr(uintptr(transfer_ptr) + uintptr(vertex_buffer_size + index_buffer_size))
+	index_data  := cast([^]u16)rawptr(uintptr(transfer_ptr) + uintptr(VERTEX_BUFFER_SIZE))
+	color_data  := cast([^]FColor)rawptr(uintptr(transfer_ptr) + uintptr(VERTEX_BUFFER_SIZE + INDEX_BUFFER_SIZE))
 
 	for rect, idx in rects {
 		idx4 := idx * 4
@@ -231,36 +244,36 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 		color_data[idx] = rect_colors[idx % len(rect_colors)]
 	}
 
-	sdl.UnmapGPUTransferBuffer(app_ctx.device, transfer_buffer)
+	sdl.UnmapGPUTransferBuffer(app_ctx.device, app_ctx.transfer_buffer)
 
 	copy_pass := sdl.BeginGPUCopyPass(cmd_buf)
 
 	sdl.UploadToGPUBuffer(copy_pass, {
-		transfer_buffer = transfer_buffer,
+		transfer_buffer = app_ctx.transfer_buffer,
 		offset = 0,
 	}, {
-		buffer = vertex_buffer,
+		buffer = app_ctx.vertex_buffer,
 		offset = 0,
-		size = vertex_buffer_size,
-	}, false)
+		size = u32(size_of(Vector2) * 4 * len(rects)),
+	}, true)
 
 	sdl.UploadToGPUBuffer(copy_pass, {
-		transfer_buffer = transfer_buffer,
-		offset = vertex_buffer_size,
+		transfer_buffer = app_ctx.transfer_buffer,
+		offset = VERTEX_BUFFER_SIZE,
 	}, {
-		buffer = index_buffer,
+		buffer = app_ctx.index_buffer,
 		offset = 0,
-		size = index_buffer_size,
-	}, false)
+		size = u32(size_of(u16) * 6 * len(rects)),
+	}, true)
 
 	sdl.UploadToGPUBuffer(copy_pass, {
-		transfer_buffer = transfer_buffer,
-		offset = vertex_buffer_size + index_buffer_size,
+		transfer_buffer = app_ctx.transfer_buffer,
+		offset = VERTEX_BUFFER_SIZE + INDEX_BUFFER_SIZE,
 	}, {
-		buffer = color_buffer,
+		buffer = app_ctx.color_buffer,
 		offset = 0,
-		size = color_buffer_size,
-	}, false)
+		size = u32(size_of(FColor) * len(rects)),
+	}, true)
 
 	sdl.EndGPUCopyPass(copy_pass)
 
@@ -276,13 +289,13 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 	sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
 	sdl.BindGPUVertexBuffers(render_pass, 0, raw_data([]sdl.GPUBufferBinding{
 		{
-			buffer = vertex_buffer,
+			buffer = app_ctx.vertex_buffer,
 			offset = 0,
 		},
 	}), 1)
-	sdl.BindGPUVertexStorageBuffers(render_pass, 0, raw_data([]^sdl.GPUBuffer{color_buffer}), 1)
+	sdl.BindGPUVertexStorageBuffers(render_pass, 0, raw_data([]^sdl.GPUBuffer{app_ctx.color_buffer}), 1)
 	sdl.BindGPUIndexBuffer(render_pass, {
-		buffer = index_buffer,
+		buffer = app_ctx.index_buffer,
 		offset = 0,
 	}, ._16BIT)
 	sdl.DrawGPUIndexedPrimitives(render_pass, u32(6 * len(rects)), 1, 0, 0, 0)
@@ -293,11 +306,6 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 		fmt.eprintf("Failed to submit GPU command buffer. Error: %s\n", sdl.GetError())
 		return 1
 	}
-
-	sdl.ReleaseGPUTransferBuffer(app_ctx.device, transfer_buffer)
-	sdl.ReleaseGPUBuffer(app_ctx.device, vertex_buffer)
-	sdl.ReleaseGPUBuffer(app_ctx.device, index_buffer)
-	sdl.ReleaseGPUBuffer(app_ctx.device, color_buffer)
 
 	return 0
 }
