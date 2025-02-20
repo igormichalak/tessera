@@ -329,21 +329,22 @@ run :: proc() -> (code: int) {
 	sdl.ReleaseGPUShader(app_ctx.device, vert_shader)
 	sdl.ReleaseGPUShader(app_ctx.device, frag_shader)
 
-	rects := make([dynamic]FRect, 0, 8)
-	defer delete(rects)
+	rects := []FRect{
+		{
+			x = 10,
+			y = 10,
+			w = 60,
+			h = 30,
+		},
+		{
+			x = 140,
+			y = 170,
+			w = 80,
+			h = 90,
+		},
+	}
 
-	append(&rects, FRect{
-		x = 10,
-		y = 10,
-		w = 60,
-		h = 30,
-	})
-	append(&rects, FRect{
-		x = 140,
-		y = 170,
-		w = 80,
-		h = 90,
-	})
+	ensure(len(rects) <= MAX_RECTS)
 
 	should_close := false
 	for !should_close {
