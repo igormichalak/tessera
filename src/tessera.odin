@@ -1,5 +1,7 @@
 package tessera
 
+EPSILON :: 1e-7
+
 Direction :: enum {
 	ROW,
 	ROW_REVERSE,
@@ -106,6 +108,47 @@ balance_grow_boxes :: proc(grow_boxes: []^Box, total_space: f64, grow_sum: u32) 
 
 	for &box in grow_boxes {
 		box.computed.main_size = box.properties.main_grow * space_per_grow_unit
+		box.computed.is_at_basis = false
+		box.computed.is_at_limit = false
+	}
+
+	redistributable_space: float64
+	remaining_grow_sum: u32
+
+	for &box in grow_boxes {
+		if box.computed.main_size > box.computed.main_grow_limit {
+			redistributable_space += box.computed.main_size - box.computed.main_grow_limit
+			box.computed.main_size = box.computed.main_grow_limit
+			box.computed.is_at_limit = true
+		} else if box.computed.main_size == box.computed.main_grow_limit {
+			box.computed.is_at_limit = true
+		} else {
+			remaining_grow_sum += box.properties.main_grow
+			box.computed.is_at_limit = false
+		}
+	}
+
+	space_changed := true
+	for space_changed {
+		space_changed = false
+		space_per_remaining_grow_unit := redistributable_space / f64(remaining_grow_sum)
+
+		for &box in grow_boxes {
+			if box.computed.is_at_limit {
+				continue
+			}
+			growth_space := box.properties.main_grow * space_per_remaining_grow_unit
+			if box.computed.main_size + growth_space >= box.computed.main_grow_limit {
+				growth_space = box.computed_main_grow_limit - box.computed.main_size
+				remaining_grow_sum -= box.properties.main_grow
+				box.computed.is_at_limit = true
+			}
+			if growth_space > EPSILON {
+				redistributable_space -= growth_space
+				box.computed.main_size += growth_space
+				space_changed = true
+			}
+		}
 	}
 }
 
@@ -140,28 +183,28 @@ compute_box :: proc(
 
 		if is_row_direction(props.items_direction) {
 			if c_main_auto {
-				c_reserved_width = 0
+				c_reserved_width = 0.0
 			} else {
 				c_reserved_width = compute_unit_value(c_box.properties.main_size, reserved_width)
 				c_box.computed.main_size_basis = c_reserved_width
 				c_box.computed.main_size = c_reserved_width
 			}
 			if c_cross_auto {
-				c_reserved_height = 0
+				c_reserved_height = 0.0
 			} else {
 				c_reserved_height = compute_unit_value(c_box.properties.cross_size, reserved_height)
 				c_box.computed.cross_size = c_reserved_height
 			}
 		} else {
 			if c_main_auto {
-				c_reserved_height = 0
+				c_reserved_height = 0.0
 			} else {
 				c_reserved_height = compute_unit_value(c_box.properties.main_size, reserved_height)
 				c_box.computed.main_size_basis = c_reserved_height
 				c_box.computed.main_size = c_reserved_height
 			}
 			if c_cross_auto {
-				c_reserved_width = 0
+				c_reserved_width = 0.0
 			} else {
 				c_reserved_width = compute_unit_value(c_box.properties.cross_size, reserved_width)
 				c_box.computed.cross_size = c_reserved_width
@@ -204,14 +247,14 @@ compute_box :: proc(
 		grow_sum += c_box.properties.main_grow
 	}
 
-	free_main_space: u32
+	free_main_space: f64
 	if is_row_direction(props.items_direction) {
 		free_main_space = reserved_width - reserved_main_space
 	} else {
 		free_main_space = reserved_height - reserved_main_space
 	}
 
-	if free_main_space > 0 && grow_sum > 0 {
+	if free_main_space > EPSILON && grow_sum > 0 {
 		balance_grow_boxes(grow_boxes[:], free_main_space, grow_sum)
 	}
 	delete(grow_boxes)
