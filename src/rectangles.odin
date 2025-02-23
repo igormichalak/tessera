@@ -5,12 +5,14 @@ import "core:os"
 import sdl "vendor:sdl3"
 import "./shadercross"
 
+Vector2f32 :: distinct [2]f32
+
 FRect :: struct { x, y, w, h: f64 }
 FColor :: distinct [4]f32
 
 MAX_RECTS :: 32
 
-VERTEX_BUFFER_SIZE :: u32(size_of(Vector2) * 4 * MAX_RECTS)
+VERTEX_BUFFER_SIZE :: u32(size_of(Vector2f32) * 4 * MAX_RECTS)
 INDEX_BUFFER_SIZE :: u32(size_of(u16) * 6 * MAX_RECTS)
 COLOR_BUFFER_SIZE :: u32(size_of(FColor) * MAX_RECTS)
 
@@ -47,7 +49,7 @@ app_init :: proc() -> int {
 		fmt.eprintf("Failed to create device. Error: %s\n", sdl.GetError())
 		return 1
 	}
-	app_ctx.window = sdl.CreateWindow("Tessera Demo", 800, 600, {.RESIZABLE})
+	app_ctx.window = sdl.CreateWindow("Tessera Demo", 800, 600, {.RESIZABLE, .VULKAN})
 	if app_ctx.window == nil {
 		fmt.eprintf("Failed to create window. Error: %s\n", sdl.GetError())
 		return 1
@@ -166,7 +168,7 @@ create_pipeline :: proc(vert_shader, frag_shader: ^sdl.GPUShader) -> (pipeline: 
 					slot = 0,
 					input_rate = .VERTEX,
 					instance_step_rate = 0,
-					pitch = size_of(Vector2),
+					pitch = size_of(Vector2f32),
 				},
 			}),
 			num_vertex_attributes = 1,
@@ -195,7 +197,7 @@ create_pipeline :: proc(vert_shader, frag_shader: ^sdl.GPUShader) -> (pipeline: 
 	return pipeline, 0
 }
 
-clip_space :: proc(position, viewport: Vector2) -> Vector2 {
+clip_space :: proc(position, viewport: Vector2f32) -> Vector2f32 {
 	return { (position.x / viewport.x * 2 - 1), -(position.y / viewport.y * 2 - 1) }
 }
 
@@ -217,20 +219,20 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 		return 1
 	}
 
-	viewport := Vector2{f64(vw), f64(vh)}
+	viewport := Vector2f32{f32(vw), f32(vh)}
 
 	transfer_ptr := sdl.MapGPUTransferBuffer(app_ctx.device, app_ctx.transfer_buffer, true)
 
-	vertex_data := cast([^]Vector2)transfer_ptr
+	vertex_data := cast([^]Vector2f32)transfer_ptr
 	index_data  := cast([^]u16)rawptr(uintptr(transfer_ptr) + uintptr(VERTEX_BUFFER_SIZE))
 	color_data  := cast([^]FColor)rawptr(uintptr(transfer_ptr) + uintptr(VERTEX_BUFFER_SIZE + INDEX_BUFFER_SIZE))
 
 	for rect, idx in rects {
 		idx4 := idx * 4
-		vertex_data[idx4 + 0] = clip_space({ (rect.x         ), (rect.y         ) }, viewport)
-		vertex_data[idx4 + 1] = clip_space({ (rect.x + rect.w), (rect.y         ) }, viewport)
-		vertex_data[idx4 + 2] = clip_space({ (rect.x + rect.w), (rect.y + rect.h) }, viewport)
-		vertex_data[idx4 + 3] = clip_space({ (rect.x         ), (rect.y + rect.h) }, viewport)
+		vertex_data[idx4 + 0] = clip_space({ f32(rect.x         ), f32(rect.y         ) }, viewport)
+		vertex_data[idx4 + 1] = clip_space({ f32(rect.x + rect.w), f32(rect.y         ) }, viewport)
+		vertex_data[idx4 + 2] = clip_space({ f32(rect.x + rect.w), f32(rect.y + rect.h) }, viewport)
+		vertex_data[idx4 + 3] = clip_space({ f32(rect.x         ), f32(rect.y + rect.h) }, viewport)
 
 		idx6 := idx * 6
 		index_data[idx6 + 0] = u16(idx4 + 0)
@@ -253,7 +255,7 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 	}, {
 		buffer = app_ctx.vertex_buffer,
 		offset = 0,
-		size = u32(size_of(Vector2) * 4 * len(rects)),
+		size = u32(size_of(Vector2f32) * 4 * len(rects)),
 	}, true)
 
 	sdl.UploadToGPUBuffer(copy_pass, {
@@ -309,6 +311,60 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 	return 0
 }
 
+generate_rects :: proc(rects: ^[dynamic]FRect, viewport_width, viewport_height: f64) {
+	clear(rects)
+
+	lc := Layout_Context{
+		viewport_width = viewport_width,
+		viewport_height = viewport_height,
+		scaling_factor_inv = 1.0,
+	}
+
+	root_box := Box{
+		properties = {
+			main_size = Unit_Value{.PRATIO, 1.0},
+			cross_size = Unit_Value{.PRATIO, 1.0},
+			items_direction = .COLUMN,
+			items_main_align = .START,
+			items_cross_align = .START,
+		},
+		children = {
+			{
+				properties = {
+					main_size = Unit_Value{.PX, 200.0},
+					main_grow = 2,
+					main_grow_limit = Unit_Value{.PX, 1e6},
+					cross_size = Unit_Value{.PRATIO, 0.5},
+				},
+			},
+			{
+				properties = {
+					main_size = Unit_Value{.PX, 0.0},
+					main_grow = 3,
+					main_grow_limit = Unit_Value{.PX, 800.0},
+					cross_size = Unit_Value{.PRATIO, 0.6},
+				},
+			},
+		},
+	}
+
+	compute_box(&lc, &root_box, viewport_width, viewport_height)
+
+	layout_rectangles := make([dynamic]Rectangle, 0, 16)
+	defer delete(layout_rectangles)
+
+	collect_rectangles(&root_box, &layout_rectangles)
+
+	for &lrect in layout_rectangles {
+		append(rects, FRect{
+			x = lrect.anchor.x,
+			y = lrect.anchor.y,
+			w = lrect.width,
+			h = lrect.height,
+		})
+	}
+}
+
 run :: proc() -> (code: int) {
 	if code = app_init(); code > 0 do return code
 	defer app_quit()
@@ -328,22 +384,9 @@ run :: proc() -> (code: int) {
 	sdl.ReleaseGPUShader(app_ctx.device, vert_shader)
 	sdl.ReleaseGPUShader(app_ctx.device, frag_shader)
 
-	rects := []FRect{
-		{
-			x = 10,
-			y = 10,
-			w = 60,
-			h = 30,
-		},
-		{
-			x = 140,
-			y = 170,
-			w = 80,
-			h = 90,
-		},
-	}
-
-	ensure(len(rects) <= MAX_RECTS)
+	width, height: i32
+	rects := make([dynamic]FRect, 0, 16)
+	defer delete(rects)
 
 	should_close := false
 	for !should_close {
@@ -354,6 +397,9 @@ run :: proc() -> (code: int) {
 				should_close = true
 			}
 		}
+		sdl.GetWindowSize(app_ctx.window, &width, &height)
+		generate_rects(&rects, f64(width), f64(height))
+		ensure(len(rects) <= MAX_RECTS)
 		draw(pipeline, rects[:])
 	}
 

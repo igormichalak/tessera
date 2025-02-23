@@ -78,8 +78,8 @@ Box_Computed :: struct {
 
 Box :: struct {
 	computed: Box_Computed,
-	children: []Box,
 	properties: Box_Properties,
+	children: []Box,
 }
 
 cmpf :: #force_inline proc(a: f64, $op: string, b: f64) -> bool {
@@ -332,6 +332,35 @@ compute_box :: proc(
 		height += c_height
 	}
 
+	switch props.items_main_align {
+	case .START:
+		if is_row_direction(props.items_direction) {
+			offset_x: f64
+			for &c_box in target_box.children {
+				c_box.computed.rectangle.anchor.x = offset_x
+				c_box.computed.rectangle.anchor.y = 0.0
+				offset_x += c_box.computed.rectangle.width
+			}
+		} else {
+			offset_y: f64
+			for &c_box in target_box.children {
+				c_box.computed.rectangle.anchor.x = 0.0
+				c_box.computed.rectangle.anchor.y = offset_y
+				offset_y += c_box.computed.rectangle.height
+			}
+		}
+	case .CENTER:
+		unimplemented()
+	case .END:
+		unimplemented()
+	case .SPACE_BETWEEN:
+		unimplemented()
+	case .SPACE_AROUND:
+		unimplemented()
+	case .SPACE_EVENLY:
+		unimplemented()
+	}
+
 	if is_row_direction(props.items_direction) {
 		if !main_auto {
 			width = reserved_width
@@ -348,5 +377,15 @@ compute_box :: proc(
 		}
 	}
 
-	return { width, height }
+	target_box.computed.rectangle.width = width
+	target_box.computed.rectangle.height = height
+
+	return Vector2{width, height}
+}
+
+collect_rectangles :: proc(target_box: ^Box, accumulator: ^[dynamic]Rectangle) {
+	append(accumulator, target_box.computed.rectangle)
+	for &c_box in target_box.children {
+		collect_rectangles(&c_box, accumulator)
+	}
 }
