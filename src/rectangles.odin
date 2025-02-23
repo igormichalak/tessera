@@ -5,8 +5,7 @@ import "core:os"
 import sdl "vendor:sdl3"
 import "./shadercross"
 
-Vector2 :: distinct [2]f32
-FRect :: struct { x, y, w, h: f32 }
+FRect :: struct { x, y, w, h: f64 }
 FColor :: distinct [4]f32
 
 MAX_RECTS :: 32
@@ -218,7 +217,7 @@ draw :: proc(pipeline: ^sdl.GPUGraphicsPipeline, rects: []FRect) -> int {
 		return 1
 	}
 
-	viewport := Vector2{f32(vw), f32(vh)}
+	viewport := Vector2{f64(vw), f64(vh)}
 
 	transfer_ptr := sdl.MapGPUTransferBuffer(app_ctx.device, app_ctx.transfer_buffer, true)
 

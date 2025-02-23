@@ -1,6 +1,10 @@
 package tessera
 
-EPSILON :: 1e-7
+Layout_Context :: struct {
+	viewport_width: f64,
+	viewport_height: f64,
+	scaling_factor_inv: f64,
+}
 
 Direction :: enum {
 	ROW,
@@ -67,8 +71,6 @@ Box_Computed :: struct {
 	main_size: f64,
 	main_grow_inverse: f64,
 	main_grow_limit: f64,
-	is_at_basis: bool,
-	is_at_limit: bool,
 	cross_size: f64,
 	rectangle: Rectangle,
 	depth: u32,
@@ -80,19 +82,39 @@ Box :: struct {
 	properties: Box_Properties,
 }
 
-compute_unit_value :: proc(unit_value: Unit_Value, parent_size: f64) -> f64 {
+cmpf :: #force_inline proc(a: f64, $op: string, b: f64) -> bool {
+	EPSILON :: 1e-15
+	when op == "==" {
+		return abs(a - b) < EPSILON
+	} else when op == "!=" {
+		return abs(a - b) > EPSILON
+	} else when op == "<" {
+		return (b - a) > EPSILON
+	} else when op == "<=" {
+		return ((b - a) > EPSILON) || (abs(a - b) < EPSILON)
+	} else when op == ">" {
+		return (a - b) > EPSILON
+	} else when op == ">=" {
+		return ((a - b) > EPSILON) || (abs(a - b) < EPSILON)
+	} else {
+		#panic("Unrecognized operator!")
+	}
+}
+
+compute_unit_value :: proc(lc: ^Layout_Context, unit_value: Unit_Value, parent_size: f64) -> f64 {
 	switch unit_value.unit {
 	case .PX:
 		return unit_value.value
 	case .DPX:
-		return unit_value.value * context.scaling_factor_inv
+		return unit_value.value * lc.scaling_factor_inv
 	case .VW:
-		return unit_value.value * context.viewport_width
+		return unit_value.value * lc.viewport_width
 	case .VH:
-		return unit_value.value * context.viewport_height
+		return unit_value.value * lc.viewport_height
 	case .PRATIO:
 		return unit_value.value * parent_size
 	}
+	return 0.0
 }
 
 is_row_direction :: proc(direction: Direction) -> bool {
@@ -106,53 +128,85 @@ is_column_direction :: proc(direction: Direction) -> bool {
 balance_grow_boxes :: proc(grow_boxes: []^Box, total_space: f64, grow_sum: u32) {
 	space_per_grow_unit := total_space / f64(grow_sum)
 
-	for &box in grow_boxes {
-		box.computed.main_size = box.properties.main_grow * space_per_grow_unit
-		box.computed.is_at_basis = false
-		box.computed.is_at_limit = false
-	}
+	growable_sum: u32
+	growable_boxes := make([dynamic]^Box, 0, len(grow_boxes))
+	defer delete(growable_boxes)
 
-	redistributable_space: float64
-	remaining_grow_sum: u32
+	shrinkable_sum: f64
+	shrinkable_boxes := make([dynamic]^Box, 0, len(grow_boxes))
+	defer delete(shrinkable_boxes)
+
+	available_space: f64
 
 	for &box in grow_boxes {
-		if box.computed.main_size > box.computed.main_grow_limit {
-			redistributable_space += box.computed.main_size - box.computed.main_grow_limit
+		space := f64(box.properties.main_grow) * space_per_grow_unit
+
+		switch {
+		case cmpf(space, "<", box.computed.main_size_basis):
+			available_space = available_space - (box.computed.main_size_basis - space)
+			box.computed.main_size = box.computed.main_size_basis
+		case cmpf(space, ">", box.computed.main_grow_limit):
+			available_space = available_space + (space - box.computed.main_grow_limit)
 			box.computed.main_size = box.computed.main_grow_limit
-			box.computed.is_at_limit = true
-		} else if box.computed.main_size == box.computed.main_grow_limit {
-			box.computed.is_at_limit = true
-		} else {
-			remaining_grow_sum += box.properties.main_grow
-			box.computed.is_at_limit = false
+		case:
+			box.computed.main_size = space
+		}
+
+		if cmpf(space, ">", box.computed.main_size_basis) {
+			shrinkable_sum += box.computed.main_grow_inverse
+			append(&shrinkable_boxes, box)
+		}
+		if cmpf(space, "<", box.computed.main_grow_limit) {
+			growable_sum += box.properties.main_grow
+			append(&growable_boxes, box)
 		}
 	}
 
 	space_changed := true
 	for space_changed {
 		space_changed = false
-		space_per_remaining_grow_unit := redistributable_space / f64(remaining_grow_sum)
 
-		for &box in grow_boxes {
-			if box.computed.is_at_limit {
-				continue
+		if cmpf(available_space, ">", 0.0) {
+			space_per_growable_unit := available_space / f64(growable_sum)
+			for i := len(growable_boxes) - 1; i >= 0; i -= 1 {
+				box := growable_boxes[i]
+				grow_space := f64(box.properties.main_grow) * space_per_growable_unit
+				max_grow_space := box.computed.main_grow_limit - box.computed.main_size
+				if cmpf(grow_space, ">", max_grow_space) {
+					grow_space = max_grow_space
+					growable_sum = growable_sum - box.properties.main_grow
+					unordered_remove(&growable_boxes, i)
+				}
+				if cmpf(grow_space, ">", 0.0) {
+					box.computed.main_size = box.computed.main_size + grow_space
+					available_space = available_space - grow_space
+					space_changed = true
+				}
 			}
-			growth_space := box.properties.main_grow * space_per_remaining_grow_unit
-			if box.computed.main_size + growth_space >= box.computed.main_grow_limit {
-				growth_space = box.computed_main_grow_limit - box.computed.main_size
-				remaining_grow_sum -= box.properties.main_grow
-				box.computed.is_at_limit = true
-			}
-			if growth_space > EPSILON {
-				redistributable_space -= growth_space
-				box.computed.main_size += growth_space
-				space_changed = true
+		}
+		if cmpf(available_space, "<", 0.0) {
+			space_per_shrinkable_unit := available_space / f64(shrinkable_sum)
+			for i := len(shrinkable_boxes) - 1; i >= 0; i -= 1 {
+				box := shrinkable_boxes[i]
+				shrink_space := box.computed.main_grow_inverse * -(space_per_shrinkable_unit)
+				max_shrink_space := -(box.computed.main_size_basis - box.computed.main_size)
+				if cmpf(shrink_space, ">", max_shrink_space) {
+					shrink_space = max_shrink_space
+					shrinkable_sum = shrinkable_sum - box.computed.main_grow_inverse
+					unordered_remove(&shrinkable_boxes, i)
+				}
+				if cmpf(shrink_space, ">", 0.0) {
+					box.computed.main_size = box.computed.main_size - shrink_space
+					available_space = available_space + shrink_space
+					space_changed = true
+				}
 			}
 		}
 	}
 }
 
 compute_box :: proc(
+	lc: ^Layout_Context,
 	target_box: ^Box,
 	reserved_width: f64,
 	reserved_height: f64,
@@ -161,8 +215,8 @@ compute_box :: proc(
 	props := target_box.properties
 	target_box.computed.depth = depth
 
-	main_mode, uses_main_mode := main_size.(Dimension_Mode)
-	cross_mode, uses_cross_mode := cross_size.(Dimension_Mode)
+	main_mode, uses_main_mode := props.main_size.(Dimension_Mode)
+	cross_mode, uses_cross_mode := props.cross_size.(Dimension_Mode)
 
 	main_auto := uses_main_mode && main_mode == .AUTO
 	cross_auto := uses_cross_mode && cross_mode == .AUTO
@@ -185,34 +239,34 @@ compute_box :: proc(
 			if c_main_auto {
 				c_reserved_width = 0.0
 			} else {
-				c_reserved_width = compute_unit_value(c_box.properties.main_size, reserved_width)
+				c_reserved_width = compute_unit_value(lc, c_box.properties.main_size.(Unit_Value), reserved_width)
 				c_box.computed.main_size_basis = c_reserved_width
 				c_box.computed.main_size = c_reserved_width
 			}
 			if c_cross_auto {
 				c_reserved_height = 0.0
 			} else {
-				c_reserved_height = compute_unit_value(c_box.properties.cross_size, reserved_height)
+				c_reserved_height = compute_unit_value(lc, c_box.properties.cross_size.(Unit_Value), reserved_height)
 				c_box.computed.cross_size = c_reserved_height
 			}
 		} else {
 			if c_main_auto {
 				c_reserved_height = 0.0
 			} else {
-				c_reserved_height = compute_unit_value(c_box.properties.main_size, reserved_height)
+				c_reserved_height = compute_unit_value(lc, c_box.properties.main_size.(Unit_Value), reserved_height)
 				c_box.computed.main_size_basis = c_reserved_height
 				c_box.computed.main_size = c_reserved_height
 			}
 			if c_cross_auto {
 				c_reserved_width = 0.0
 			} else {
-				c_reserved_width = compute_unit_value(c_box.properties.cross_size, reserved_width)
+				c_reserved_width = compute_unit_value(lc, c_box.properties.cross_size.(Unit_Value), reserved_width)
 				c_box.computed.cross_size = c_reserved_width
 			}
 		}
 
-		if c_main_auto || c_main_cross {
-			c_size := compute_box(&box, c_reserved_width, c_reserved_height, depth + 1)
+		if c_main_auto || c_cross_auto {
+			c_size := compute_box(lc, &c_box, c_reserved_width, c_reserved_height, depth + 1)
 			if is_row_direction(props.items_direction) {
 				if c_main_auto {
 					c_box.computed.main_size_basis = c_size.x
@@ -232,9 +286,9 @@ compute_box :: proc(
 			}
 		}
 
-		c_box.computed.main_grow_inverse = 1.0 / c_box.properties.main_grow
+		c_box.computed.main_grow_inverse = 1.0 / f64(c_box.properties.main_grow)
 		c_box.computed.main_grow_limit = compute_unit_value(
-			c_box.properties.main_grow_limit,
+			lc, c_box.properties.main_grow_limit,
 			reserved_width if is_row_direction(props.items_direction) else reserved_height,
 		)
 
@@ -254,8 +308,45 @@ compute_box :: proc(
 		free_main_space = reserved_height - reserved_main_space
 	}
 
-	if free_main_space > EPSILON && grow_sum > 0 {
+	if cmpf(free_main_space, ">", 0.0) && grow_sum > 0 {
 		balance_grow_boxes(grow_boxes[:], free_main_space, grow_sum)
 	}
 	delete(grow_boxes)
+
+	width, height: f64
+
+	for &c_box in target_box.children {
+		c_width, c_height: f64
+
+		if is_row_direction(props.items_direction) {
+			c_width = c_box.computed.main_size
+			c_height = c_box.computed.cross_size
+		} else {
+			c_width = c_box.computed.cross_size
+			c_height = c_box.computed.main_size
+		}
+
+		compute_box(lc, &c_box, c_width, c_height, depth + 1)
+
+		width += c_width
+		height += c_height
+	}
+
+	if is_row_direction(props.items_direction) {
+		if !main_auto {
+			width = reserved_width
+		}
+		if !cross_auto {
+			height = reserved_height
+		}
+	} else {
+		if !main_auto {
+			height = reserved_height
+		}
+		if !cross_auto {
+			width = reserved_width
+		}
+	}
+
+	return { width, height }
 }
